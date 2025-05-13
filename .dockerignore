@@ -7,4 +7,3 @@ Dockerfile
 *.md
 .env
 *.log
-database.db

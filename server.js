@@ -29,7 +29,7 @@ app.use((req, res, next) => {
 
 // Configure CORS with specific options
 app.use(cors({
-  origin: ['http://localhost:8080', 'https://worthwhile-willi-devoxwears-a016cc83.koyeb.app'],
+  origin: ['http://localhost:8080', 'https://naasacademybackend.koyeb.app'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
@@ -37,6 +37,7 @@ app.use(cors({
 }));
 
 app.use(bodyParser.json());
+
 
 // Login endpoint
 app.post('/login', async (req, res) => {
