@@ -27,7 +27,15 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(cors());
+// Configure CORS with specific options
+app.use(cors({
+  origin: ['http://localhost:8080', 'http://mammoth-gertrude-devoxwears-8c3563d0.koyeb.app'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  maxAge: 86400 // 24 hours
+}));
+
 app.use(bodyParser.json());
 
 // Login endpoint
