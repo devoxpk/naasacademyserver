@@ -29,7 +29,7 @@ app.use((req, res, next) => {
 
 // Configure CORS with specific options
 app.use(cors({
-  origin: ['http://localhost:8080', 'http://mammoth-gertrude-devoxwears-8c3563d0.koyeb.app'],
+  origin: ['http://localhost:8080', 'https://worthwhile-willi-devoxwears-a016cc83.koyeb.app'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
