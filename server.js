@@ -31,7 +31,8 @@ app.use((req, res, next) => {
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control'],
+  exposedHeaders: ['Content-Type', 'Authorization', 'Cache-Control'],
   credentials: true,
   maxAge: 86400 // 24 hours
 }));
@@ -412,6 +413,10 @@ app.get('/courses/teacher', async (req, res) => {
        LEFT JOIN classes cl ON c.class_id = cl.id`
     );
 
+    if (!courses || courses.length === 0) {
+      return res.status(404).json({ error: 'No courses found' });
+    }
+
     // Parse schedule for each course
     const parsedCourses = courses.map(course => {
       if (course.schedule) {
@@ -427,10 +432,14 @@ app.get('/courses/teacher', async (req, res) => {
       return course;
     });
 
+    // Set cache control headers
+    res.set('Cache-Control', 'no-cache');
+    res.set('ETag', Math.random().toString(36));
+    
     res.json(parsedCourses);
   } catch (error) {
     console.error('Error fetching courses:', error);
-    res.status(500).json({ error: 'Failed to fetch courses' });
+    res.status(500).json({ error: 'Failed to fetch courses', details: error.message });
   }
 });
 
@@ -589,12 +598,18 @@ app.get('/registrations/pending', async (req, res) => {
   try {
     const db = await dbPromise;
     const rows = await db.all('SELECT * FROM users WHERE status = ?', ['pending']);
+    
+    // Set cache control headers
+    res.set('Cache-Control', 'no-cache');
+    res.set('ETag', Math.random().toString(36));
+    
     res.json(rows);
   } catch (error) {
     console.error('[Registration] Error fetching pending registrations:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch pending registrations'
+      message: 'Failed to fetch pending registrations',
+      details: error.message
     });
   }
 });
