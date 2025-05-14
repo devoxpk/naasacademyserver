@@ -109,6 +109,17 @@ const initializeDatabase = async () => {
       driver: sqlite3.Database 
     });
 
+    // Ensure contact_messages table exists
+    await ensureTable(db, 'contact_messages', `CREATE TABLE contact_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      message TEXT NOT NULL,
+      status TEXT DEFAULT 'unread',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
     // Utility to ensure a table exists, creating it if not
     async function ensureTable(db, tableName, schema) {
       const table = await db.get(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, [tableName]);
@@ -288,10 +299,15 @@ app.post('/attendance', async (req, res) => {
         });
       }
 
+      console.log(`[Attendance] Incoming date: ${date}`);
+      // Use the date string directly without timezone conversion
+      const dateString = date;
+      console.log(`[Attendance] Normalized date: ${dateString}`);
+
       // Check if attendance already exists for this date
       const existingAttendance = await db.get(
         'SELECT id FROM attendance WHERE course_id = ? AND student_id = ? AND date = ?',
-        [course_id, student_id, date]
+        [course_id, student_id, dateString]
       );
 
       if (existingAttendance) {
@@ -302,14 +318,16 @@ app.post('/attendance', async (req, res) => {
       }
     }
     
-    // Insert all attendance records
+    // Insert all attendance records with normalized dates
     const results = await Promise.all(
-      records.map(record => 
-        db.run(
+      records.map(record => {
+        const normalizedDate = new Date(record.date);
+        const dateString = normalizedDate.toISOString().split('T')[0];
+        return db.run(
           'INSERT INTO attendance (course_id, student_id, date, present) VALUES (?, ?, ?, ?)',
-          [record.course_id, record.student_id, record.date, record.present || false]
-        )
-      )
+          [record.course_id, record.student_id, dateString, record.present || false]
+        );
+      })
     );
     
     res.json({ success: true, message: `${results.length} attendance records created` });
@@ -393,7 +411,23 @@ app.get('/courses/teacher', async (req, res) => {
        FROM courses c
        LEFT JOIN classes cl ON c.class_id = cl.id`
     );
-    res.json(courses);
+
+    // Parse schedule for each course
+    const parsedCourses = courses.map(course => {
+      if (course.schedule) {
+        try {
+          course.schedule = JSON.parse(course.schedule);
+        } catch (err) {
+          console.error(`Failed to parse schedule for course ${course.id}:`, err);
+          course.schedule = [];
+        }
+      } else {
+        course.schedule = [];
+      }
+      return course;
+    });
+
+    res.json(parsedCourses);
   } catch (error) {
     console.error('Error fetching courses:', error);
     res.status(500).json({ error: 'Failed to fetch courses' });
@@ -446,6 +480,42 @@ app.get('/students/:id/attendance', async (req, res) => {
   } catch (error) {
     console.error('[Attendance] Error fetching student attendance:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch attendance' });
+  }
+});
+
+// Get course by ID
+app.get('/courses/:id', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const course = await db.get(
+      `SELECT c.*, cl.name as class_name 
+       FROM courses c
+       LEFT JOIN classes cl ON c.class_id = cl.id
+       WHERE c.id = ?`,
+      [req.params.id]
+    );
+    
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        message: 'Course not found'
+      });
+    }
+
+    // Parse schedule if it exists
+    if (course.schedule) {
+      try {
+        course.schedule = JSON.parse(course.schedule);
+      } catch (err) {
+        console.error(`Failed to parse schedule for course ${course.id}:`, err);
+        course.schedule = [];
+      }
+    }
+
+    res.json(course);
+  } catch (error) {
+    console.error('Error fetching course:', error);
+    res.status(500).json({ error: 'Failed to fetch course' });
   }
 });
 
@@ -599,6 +669,79 @@ app.delete('/registrations/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to delete registration'
+    });
+  }
+});
+
+// Contact form submission endpoint
+app.post('/contact', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { name, email, phone, message } = req.body;
+
+    // Validate required fields
+    if (!name || !email || !phone || !message) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+
+    // Insert contact message
+    await db.run(
+      'INSERT INTO contact_messages (name, email, phone, message) VALUES (?, ?, ?, ?)',
+      [name, email, phone, message]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Message sent successfully'
+    });
+  } catch (error) {
+    console.error('[Contact] Error saving contact message:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send message'
+    });
+  }
+});
+
+// Get contact messages endpoint (admin only)
+app.get('/contact-messages', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const messages = await db.all('SELECT * FROM contact_messages ORDER BY created_at DESC');
+    res.json(messages);
+  } catch (error) {
+    console.error('[Contact] Error fetching contact messages:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch contact messages'
+    });
+  }
+});
+
+// Update contact message status endpoint (admin only)
+app.put('/contact-messages/:id/status', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!['read', 'unread'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid status value'
+      });
+    }
+
+    await db.run('UPDATE contact_messages SET status = ? WHERE id = ?', [status, id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Contact] Error updating message status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update message status'
     });
   }
 });
