@@ -11,6 +11,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.use(express.json({ limit: '50mb' }));            // :contentReference[oaicite:5]{index=5}
+// Allow URL-encoded bodies up to 10 MB
+app.use(express.urlencoded({ limit: '50mb', extended: true }));  // :contentReference[oaicite:6]{index=6}
 
 // Simple request logging middleware
 app.use((req, res, next) => {
@@ -73,15 +76,6 @@ app.post('/login', async (req, res) => {
       });
     }
 
-    // Check if user is approved
-    if (user.status !== 'approved') {
-      console.log(`[Login] Failed login attempt for email ${email}: Account pending approval`);
-      return res.status(403).json({
-        success: false,
-        message: 'Your account is pending approval'
-      });
-    }
-
     console.log(`[Login] Successful login for user: ${user.email} (${user.role})`);
 
     res.json({
@@ -133,7 +127,7 @@ const initializeDatabase = async () => {
     // Ensure users table exists
     await ensureTable(db, 'users', `CREATE TABLE users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      registration_id TEXT UNIQUE,
+      registrationId TEXT UNIQUE,
       name TEXT NOT NULL,
       email TEXT UNIQUE,
       phone TEXT,
@@ -142,8 +136,25 @@ const initializeDatabase = async () => {
       student_name TEXT,
       student_grade TEXT,
       status TEXT DEFAULT 'pending',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      gender TEXT,
+      documents TEXT,
+      selected_class TEXT,
+      paid BOOLEAN DEFAULT 0
     )`);
+    // Ensure gender column exists in users table
+    const userColumns = await db.all("PRAGMA table_info(users)");
+    const hasGender = userColumns.some(col => col.name === 'gender');
+    if (!hasGender) {
+      await db.exec('ALTER TABLE users ADD COLUMN gender TEXT');
+      console.log('[Database] Added missing gender column to users table');
+    }
+    // Ensure documents column exists in users table
+    const hasDocuments = userColumns.some(col => col.name === 'documents');
+    if (!hasDocuments) {
+      await db.exec('ALTER TABLE users ADD COLUMN documents TEXT');
+      console.log('[Database] Added missing documents column to users table');
+    }
     // Ensure classes table exists
     await ensureTable(db, 'classes', `CREATE TABLE classes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -471,6 +482,23 @@ app.delete('/attendance/:id', async (req, res) => {
   }
 });
 
+// Get application status
+app.get('/application-status/:studentId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { studentId } = req.params;
+    const user = await db.get('SELECT status, paid, documents FROM users WHERE id = ?', [studentId]);
+    res.json({
+      status: user?.status || 'pending',
+      paid: user?.paid || false,
+      documents: user?.documents || ''
+    });
+  } catch (error) {
+    console.error('Error checking application status:', error);
+    res.status(500).json({ error: 'Failed to check application status' });
+  }
+});
+
 // Get student's attendance
 app.get('/students/:id/attendance', async (req, res) => {
   try {
@@ -546,8 +574,13 @@ app.post('/register', async (req, res) => {
       selectedClass
     } = req.body;
 
+    console.log('[Registration] Received gender:', gender);
+    console.log('[Registration] Full request body:', req.body);
+
     // Validate required fields
-    if (!name || !email || !password || !role || !registrationId) {
+    const requiredFieldsPresent = name && email && password && role && registrationId;
+    console.log('[Registration] Required fields present:', requiredFieldsPresent);
+    if (!requiredFieldsPresent) {
       return res.status(400).json({
         success: false,
         message: 'Missing required fields'
@@ -565,6 +598,7 @@ app.post('/register', async (req, res) => {
 
     // Check if email already exists
     const existingUser = await db.get('SELECT email FROM users WHERE email = ?', [email]);
+    console.log('[Registration] Existing user:', existingUser);
     if (existingUser) {
       console.log(`Registration attempt with existing email: ${email}`);
       return res.status(409).json({
@@ -573,11 +607,27 @@ app.post('/register', async (req, res) => {
       });
     }
 
-    await db.run(
-      `INSERT INTO users (registration_id, name, email, phone, password, role, student_name, student_grade, gender, documents, selected_class)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [registrationId, name, email, phone, password, role, studentName, studentGrade, gender, documents, selectedClass]
-    );
+    // Dynamically add missing columns
+    const userColumns = await db.all("PRAGMA table_info(users)");
+    const existingColumnNames = userColumns.map(col => col.name);
+    for (const key of Object.keys(req.body)) {
+      if (!existingColumnNames.includes(key)) {
+        // Infer type: if value is number, use INTEGER, if boolean, use BOOLEAN, else TEXT
+        let type = 'TEXT';
+        const value = req.body[key];
+        if (typeof value === 'number') type = 'INTEGER';
+        else if (typeof value === 'boolean') type = 'BOOLEAN';
+        await db.exec(`ALTER TABLE users ADD COLUMN ${key} ${type}`);
+        console.log(`[Registration] Added missing column '${key}' of type ${type} to users table`);
+      }
+    }
+
+    // Prepare insert statement dynamically
+    const insertFields = Object.keys(req.body);
+    const insertValues = insertFields.map(f => req.body[f]);
+    const placeholders = insertFields.map(() => '?').join(', ');
+    const insertSQL = `INSERT INTO users (${insertFields.join(', ')}) VALUES (${placeholders})`;
+    await db.run(insertSQL, insertValues);
 
     res.status(201).json({
       success: true,
@@ -591,7 +641,7 @@ app.post('/register', async (req, res) => {
       error: error.message
     });
   }
-});
+})
 
 // Get pending registrations
 app.get('/registrations/pending', async (req, res) => {
@@ -636,13 +686,20 @@ app.put('/registrations/:id/status', async (req, res) => {
     const { status } = req.body;
     const db = await dbPromise;
 
+    console.log(`[Update Status] Incoming request to update status for registrationId: ${id} with status: ${status}`);
+
     // Get user details
-    const user = await db.get('SELECT * FROM users WHERE registration_id = ?', [id]);
+    const user = await db.get('SELECT * FROM users WHERE registrationId = ?', [id]);
     if (!user) {
+      console.log(`[Update Status] User not found for registrationId: ${id}`);
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    await db.run('UPDATE users SET status = ? WHERE registration_id = ?', [status, id]);
+    console.log(`[Update Status] Current user status: ${user.status}`);
+
+    await db.run('UPDATE users SET status = ? WHERE registrationId = ?', [status, id]);
+
+    console.log(`[Update Status] Updated user status to: ${status}`);
 
     // If approved and student role, enroll in selected class
     if (status === 'approved' && user.role === 'student' && user.selected_class) {
@@ -650,6 +707,7 @@ app.put('/registrations/:id/status', async (req, res) => {
         'INSERT INTO student_enrollments (student_id, course_id, status) VALUES (?, ?, ?)',
         [user.id, user.selected_class, 'approved']
       );
+      console.log(`[Update Status] Enrolled student ${user.id} in class ${user.selected_class}`);
     }
 
     res.json({ success: true });
@@ -662,6 +720,175 @@ app.put('/registrations/:id/status', async (req, res) => {
   }
 });
 
+// Student Application Details API
+import multer from 'multer';
+import fs from 'fs';
+import util from 'util';
+
+const upload = multer();
+
+app.post('/student-application', upload.any(), async (req, res) => {
+  try {
+    const db = await dbPromise;
+    // Support both JSON and multipart/form-data
+    let data = req.body;
+    let fileBuffer = null;
+    let fileName = null;
+    if (req.files && req.files.length > 0) {
+      // Find the previousClassResult file
+      const file = req.files.find(f => f.fieldname === 'previousClassResult');
+      if (file) {
+        fileBuffer = file.buffer;
+        fileName = file.originalname;
+        data.previousClassResult = fileBuffer ? fileBuffer.toString('base64') : null;
+      }
+    }
+    // If not multipart, fallback to JSON
+    if (!data.previousClassResult && req.body.previousClassResult) {
+      data.previousClassResult = req.body.previousClassResult;
+    }
+    const {
+      userId,
+      classId,
+      previousClassResult,
+      bankName,
+      accountNumber,
+      accountHolderName,
+      registrationFee
+    } = data;
+
+    // Validate required fields
+    if (!userId || !classId || !previousClassResult || !bankName || !accountNumber || !accountHolderName) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+
+    // Dynamically add missing columns
+    const userColumns = await db.all("PRAGMA table_info(users)");
+    const existingColumnNames = userColumns.map(col => col.name);
+    const requiredFields = [
+      { key: 'selected_class', value: classId, type: 'TEXT' },
+      { key: 'documents', value: previousClassResult, type: 'TEXT' },
+      { key: 'bank_name', value: bankName, type: 'TEXT' },
+      { key: 'account_number', value: accountNumber, type: 'TEXT' },
+      { key: 'account_holder_name', value: accountHolderName, type: 'TEXT' },
+      { key: 'registration_fee', value: registrationFee, type: typeof registrationFee === 'number' ? 'INTEGER' : 'TEXT' }
+    ];
+    for (const field of requiredFields) {
+      if (!existingColumnNames.includes(field.key)) {
+        await db.exec(`ALTER TABLE users ADD COLUMN ${field.key} ${field.type}`);
+      }
+    }
+
+    // Update user with application details
+    // Ensure 'paid' column exists
+    if (!existingColumnNames.includes('paid')) {
+      await db.exec(`ALTER TABLE users ADD COLUMN paid TEXT`);
+    }
+    await db.run(
+      `UPDATE users SET 
+        selected_class = ?,
+        documents = ?,
+        bank_name = ?,
+        account_number = ?,
+        account_holder_name = ?,
+        registration_fee = ?,
+        paid = 'ok',
+        status = 'pending'
+      WHERE id = ?`,
+      [classId, previousClassResult, bankName, accountNumber, accountHolderName, registrationFee, userId]
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Application submitted successfully. Please wait for admin approval.'
+    });
+  } catch (error) {
+    console.error('Error submitting application:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to submit application'
+    });
+  }
+});
+
+// Teacher Application Details API
+app.post('/teacher-application', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { userId, document } = req.body;
+
+    console.log('[Teacher Application] Received request:', userId);
+
+    if (!userId || !document) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID and document are required',
+      });
+    }
+
+    // Validate document is base64 string
+    if (typeof document !== 'string' || !document.match(/^[A-Za-z0-9+/]+={0,2}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid document format',
+      });
+    }
+
+    // Update teacher's document field
+    await db.run(
+      'UPDATE users SET documents = ?, status = ? WHERE id = ?',
+      [document, 'pending', userId]
+    );
+
+    console.log(`[Teacher Application] Documents updated for teacher ${userId}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Application submitted successfully. Please wait for admin approval.',
+    });
+
+  } catch (error) {
+    console.error('Error submitting application:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to submit application',
+    });
+  }
+});
+
+
+// Check Application Status
+app.get('/application-status/:userId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { userId } = req.params;
+
+    const user = await db.get('SELECT status FROM users WHERE id = ?', [userId]);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+console.log(user.paid)
+    res.json({
+      success: true,
+      status: user.status,
+      paid:user.paid,
+    });
+  } catch (error) {
+    console.error('Error checking application status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check application status'
+    });
+  }
+});
+
 // Delete registration
 app.delete('/registrations/:id', async (req, res) => {
   try {
@@ -669,7 +896,7 @@ app.delete('/registrations/:id', async (req, res) => {
     const db = await dbPromise;
     
     // Check if registration exists
-    const registration = await db.get('SELECT * FROM users WHERE registration_id = ?', [id]);
+    const registration = await db.get('SELECT * FROM users WHERE registrationId = ?', [id]);
     if (!registration) {
       return res.status(404).json({
         success: false,
@@ -677,7 +904,7 @@ app.delete('/registrations/:id', async (req, res) => {
       });
     }
     
-    await db.run('DELETE FROM users WHERE registration_id = ?', [id]);
+    await db.run('DELETE FROM users WHERE registrationId = ?', [id]);
     res.json({ success: true });
   } catch (error) {
     console.error('[Registration] Error deleting registration:', error);
