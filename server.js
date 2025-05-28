@@ -103,6 +103,30 @@ const initializeDatabase = async () => {
       filename: path.join(__dirname, 'database.db'),
       driver: sqlite3.Database 
     });
+    
+    // Ensure course_payments table exists
+    await ensureTable(db, 'course_payments', `CREATE TABLE course_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      payment_option TEXT NOT NULL,
+      bank_name TEXT NOT NULL,
+      account_number TEXT NOT NULL,
+      account_holder_name TEXT NOT NULL,
+      payment_date DATETIME NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (student_id) REFERENCES users(id)
+    )`);
+    
+    // Ensure course_payment_items table exists
+    await ensureTable(db, 'course_payment_items', `CREATE TABLE course_payment_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL,
+      course_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (payment_id) REFERENCES course_payments(id),
+      FOREIGN KEY (course_id) REFERENCES courses(id)
+    )`);
 
     // Ensure contact_messages table exists
     await ensureTable(db, 'contact_messages', `CREATE TABLE contact_messages (
@@ -218,6 +242,59 @@ const initializeDatabase = async () => {
       FOREIGN KEY (student_id) REFERENCES users(id)
     )`);
 
+    // Ensure grades table exists
+    await ensureTable(db, 'grades', `CREATE TABLE grades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      course_id INTEGER NOT NULL,
+      student_id INTEGER NOT NULL,
+      grade INTEGER NOT NULL,
+      out_of INTEGER NOT NULL,
+      percentage REAL GENERATED ALWAYS AS (CAST(grade AS REAL) / out_of * 100) STORED,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (course_id) REFERENCES courses(id),
+      FOREIGN KEY (student_id) REFERENCES users(id)
+    )`);
+
+    // Ensure teacher_payments table exists
+    await ensureTable(db, 'teacher_payments', `CREATE TABLE teacher_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacher_id INTEGER NOT NULL,
+      amount INTEGER NOT NULL,
+      month TEXT NOT NULL,
+      year INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (teacher_id) REFERENCES users(id)
+    )`);
+
+    // Ensure student_surveys table exists
+    await ensureTable(db, 'student_surveys', `CREATE TABLE student_surveys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL,
+      teacher_id INTEGER NOT NULL,
+      responses TEXT NOT NULL,
+      submitted_at DATETIME NOT NULL,
+      FOREIGN KEY (student_id) REFERENCES users(id),
+      FOREIGN KEY (teacher_id) REFERENCES users(id)
+    )`);
+
+    // Ensure orientations table exists
+    await ensureTable(db, 'orientations', `CREATE TABLE orientations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      dateTime DATETIME NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // Ensure orientation_enrollments table exists
+    await ensureTable(db, 'orientation_enrollments', `CREATE TABLE orientation_enrollments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      orientation_id INTEGER NOT NULL,
+      student_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (orientation_id) REFERENCES orientations(id),
+      FOREIGN KEY (student_id) REFERENCES users(id)
+    )`);
+
     // Log all users in the database
     const users = await db.all('SELECT id, name, email, role, status FROM users');
     console.log('[Database] Database initialized successfully');
@@ -230,6 +307,105 @@ const initializeDatabase = async () => {
 };
 
 const dbPromise = initializeDatabase();
+
+// Survey endpoints
+app.get('/student-teachers/:studentId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const teachers = await db.all(`
+      SELECT DISTINCT u.id, u.name, c.title as course_name
+      FROM users u
+      JOIN teacher_enrollments te ON u.id = te.teacher_id
+      JOIN courses c ON te.course_id = c.id
+      JOIN student_enrollments se ON c.id = se.course_id
+      WHERE se.student_id = ? AND u.role = 'teacher'
+    `, [req.params.studentId]);
+    res.json(teachers);
+  } catch (error) {
+    console.error('Error fetching teachers:', error);
+    res.status(500).json({ error: 'Failed to fetch teachers' });
+  }
+});
+
+app.post('/submit-survey', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { studentId, teacherId, responses } = req.body;
+
+    // Check if survey already exists
+    const existingSurvey = await db.get(
+      'SELECT id FROM student_surveys WHERE student_id = ? AND teacher_id = ?',
+      [studentId, teacherId]
+    );
+
+    if (existingSurvey) {
+      return res.status(400).json({ message: 'Survey already submitted for this teacher' });
+    }
+
+    // Insert survey
+    const result = await db.run(
+      'INSERT INTO student_surveys (student_id, teacher_id, responses, submitted_at) VALUES (?, ?, ?, datetime("now"))',
+      [studentId, teacherId, JSON.stringify(responses)]
+    );
+
+    res.json({ success: true, surveyId: result.lastID });
+  } catch (error) {
+    console.error('Error submitting survey:', error);
+    res.status(500).json({ error: 'Failed to submit survey' });
+  }
+});
+
+app.get('/teacher-surveys/:teacherId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const surveys = await db.all(`
+      SELECT ss.*, c.title as course_name, u.name as student_name
+      FROM student_surveys ss
+      JOIN users u ON ss.student_id = u.id
+      JOIN teacher_enrollments te ON ss.teacher_id = te.teacher_id
+      JOIN courses c ON te.course_id = c.id
+      WHERE ss.teacher_id = ?
+      ORDER BY ss.submitted_at DESC
+    `, [req.params.teacherId]);
+
+    // Parse responses JSON for each survey
+    const processedSurveys = surveys.map(survey => ({
+      ...survey,
+      responses: JSON.parse(survey.responses)
+    }));
+
+    res.json(processedSurveys);
+  } catch (error) {
+    console.error('Error fetching surveys:', error);
+    res.status(500).json({ error: 'Failed to fetch surveys' });
+  }
+});
+
+// Get user by ID endpoint
+app.get('/users/:id', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const user = await db.get('SELECT * FROM users WHERE id = ?', [req.params.id]);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      user
+    });
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch user'
+    });
+  }
+});
 
 // Student enrollments endpoints
 app.get('/students/:studentId/enrollments', async (req, res) => {
@@ -454,6 +630,345 @@ app.get('/courses/teacher', async (req, res) => {
   }
 });
 
+// Grade management endpoints
+app.post('/grades', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { course_id, student_id, grade, out_of } = req.body;
+
+    if (!course_id || !student_id || !grade || !out_of) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields'
+      });
+    }
+
+    const result = await db.run(
+      'INSERT INTO grades (course_id, student_id, grade, out_of) VALUES (?, ?, ?, ?)',
+      [course_id, student_id, grade, out_of]
+    );
+
+    res.json({ success: true, id: result.lastID });
+  } catch (error) {
+    console.error('Error creating grade:', error);
+    res.status(500).json({ error: 'Failed to create grade' });
+  }
+});
+
+app.get('/courses/:courseId/grades', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const grades = await db.all(
+      `SELECT g.*, u.name as student_name 
+       FROM grades g
+       JOIN users u ON g.student_id = u.id
+       WHERE g.course_id = ?`,
+      [req.params.courseId]
+    );
+    res.json(grades);
+  } catch (error) {
+    console.error('Error fetching course grades:', error);
+    res.status(500).json({ error: 'Failed to fetch grades' });
+  }
+});
+
+app.get('/students/:studentId/grades', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const grades = await db.all(
+      `SELECT g.*, c.title as course_title 
+       FROM grades g
+       JOIN courses c ON g.course_id = c.id
+       WHERE g.student_id = ?`,
+      [req.params.studentId]
+    );
+    res.json(grades);
+  } catch (error) {
+    console.error('Error fetching student grades:', error);
+    res.status(500).json({ error: 'Failed to fetch grades' });
+  }
+});
+
+// Get student payments endpoint
+app.get('/student-payments', async (req, res) => {
+  try {
+    console.log('[Student Payments] Request received with query:', req.query);
+    const db = await dbPromise;
+    const payments = await db.all(
+      'SELECT * FROM course_payments WHERE student_id = ?',
+      [req.query.studentId]
+    );
+    console.log('[Student Payments] Retrieved payments:', payments);
+    res.json(payments);
+  } catch (error) {
+    console.error('[Student Payments] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+});
+
+// Update student payment to mark as full payment
+app.post('/student-payments-update', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { userId, paymentOption, amount } = req.body;
+    
+    await db.run(
+      'UPDATE course_payments SET payment_option = ?, amount = ? WHERE student_id = ?',
+      [paymentOption, amount, userId]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating payment:', error);
+    res.status(500).json({ error: 'Failed to update payment' });
+  }
+});
+
+// Student course payment endpoint
+app.post('/student-course-payment', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const {
+      userId,
+      paymentOption,
+      bank_name,
+      account_number,
+      account_holder_name,
+      amount,
+      date,
+      class_id
+    } = req.body;
+
+    console.log('[INFO] Received payment request payload:', req.body);
+
+    if (
+      !userId || !bank_name || !account_number || !paymentOption ||
+      !account_holder_name || !amount || !date
+    ) {
+      console.warn('[WARN] Missing required fields in request body.');
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: userId, bank_name, account_number, account_holder_name, amount, and date are required'
+      });
+    }
+
+    // 🔍 Ensure required columns exist in tables
+    console.log('[INFO] Checking if required columns exist...');
+    
+    // Check for all required columns in users and course_payments tables
+    const userColumns = await db.all(`PRAGMA table_info(users)`);
+    const paymentColumns = await db.all(`PRAGMA table_info(course_payments)`);
+    
+    // Ensure all required columns exist in users table
+    const requiredUserColumns = ['paidClass'];
+    for (const col of requiredUserColumns) {
+      const exists = userColumns.some(c => c.name === col);
+      if (!exists) {
+        console.log(`[INFO] Adding ${col} column to users table...`);
+        await db.run(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+      }
+    }
+    
+    // Ensure all required columns exist in course_payments table
+    const requiredPaymentColumns = ['student_id', 'amount', 'payment_option', 'bank_name', 
+                                 'account_number', 'account_holder_name', 'payment_date', 'class_id'];
+    for (const col of requiredPaymentColumns) {
+      const exists = paymentColumns.some(c => c.name === col);
+      if (!exists) {
+        const type = col === 'class_id' ? 'INTEGER' : 'TEXT';
+        console.log(`[INFO] Adding ${col} column to course_payments table...`);
+        await db.run(`ALTER TABLE course_payments ADD COLUMN ${col} ${type}`);
+      }
+    }
+
+    // ✅ Begin transaction
+    console.log('[INFO] Starting database transaction...');
+    await db.run('BEGIN TRANSACTION');
+
+    try {
+      console.log(`[INFO] Updating user ${userId} with paidClass = ${paymentOption}...`);
+      await db.run(
+        'UPDATE users SET paidClass = ? WHERE id = ?',
+        [paymentOption, userId]
+      );
+      console.log('[INFO] User updated successfully.');
+
+      console.log('[INFO] Inserting payment record into course_payments...');
+      const paymentResult = await db.run(
+        'INSERT INTO course_payments (student_id, amount, payment_option, bank_name, account_number, account_holder_name, payment_date, class_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [userId, amount, paymentOption, bank_name, account_number, account_holder_name, date, class_id]
+      );
+      const paymentId = paymentResult.lastID;
+      console.log(`[INFO] Payment record created with ID: ${paymentId}`);
+
+      // Removed enrollments processing as it was causing errors when undefined
+
+      // ✅ Commit transaction
+      await db.run('COMMIT');
+      console.log('[INFO] Transaction committed successfully.');
+
+      res.json({
+        success: true,
+        message: 'Payment processed successfully',
+        paymentId
+      });
+    } catch (error) {
+      // ❌ Rollback transaction on error
+      console.error('[ERROR] Error during transaction. Rolling back...');
+      await db.run('ROLLBACK');
+      throw error;
+    }
+  } catch (error) {
+    console.error('[ERROR] Error processing course payment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process payment'
+    });
+  }
+});
+
+
+// Teacher payment endpoints
+app.post('/teacher-payments', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { teacher_id, amount, month, year } = req.body;
+
+    if (!teacher_id || !amount || !month || !year || isNaN(amount)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid payment details'
+      });
+    }
+
+    const result = await db.run(
+      'INSERT INTO teacher_payments (teacher_id, amount, month, year) VALUES (?, ?, ?, ?)',
+      [teacher_id, amount, month, year]
+    );
+
+    res.json({ success: true, id: result.lastID });
+  } catch (error) {
+    console.error('Error creating teacher payment:', error);
+    res.status(500).json({ error: 'Failed to create payment' });
+  }
+});
+
+app.get('/teachers/:teacherId/payments', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const payments = await db.all(
+      'SELECT * FROM teacher_payments WHERE teacher_id = ? ORDER BY year DESC, month DESC',
+      [req.params.teacherId]
+    );
+    res.json(payments);
+  } catch (error) {
+    console.error('Error fetching teacher payments:', error);
+    res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+});
+
+// Orientation endpoints
+app.get('/orientations', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const orientations = await db.all(`
+      SELECT o.*, 
+        json_group_array(
+          json_object(
+            'id', oe.id,
+            'student', json_object(
+              'id', u.id,
+              'name', u.name,
+              'email', u.email
+            )
+          )
+        ) as enrollments
+      FROM orientations o
+      LEFT JOIN orientation_enrollments oe ON o.id = oe.orientation_id
+      LEFT JOIN users u ON oe.student_id = u.id
+      GROUP BY o.id
+      ORDER BY o.dateTime DESC
+    `);
+    res.json(orientations.map(o => ({
+      ...o,
+      enrollments: JSON.parse(o.enrollments).filter(e => e.student.id !== null)
+    })));
+  } catch (error) {
+    console.error('Error fetching orientations:', error);
+    res.status(500).json({ error: 'Failed to fetch orientations' });
+  }
+});
+
+app.post('/orientations', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { title, dateTime } = req.body;
+    const result = await db.run(
+      'INSERT INTO orientations (title, dateTime) VALUES (?, ?)',
+      [title, dateTime]
+    );
+    res.json({ id: result.lastID });
+  } catch (error) {
+    console.error('Error creating orientation:', error);
+    res.status(500).json({ error: 'Failed to create orientation' });
+  }
+});
+
+app.get('/orientations/enrollments/:studentId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const enrollments = await db.all(
+      'SELECT * FROM orientation_enrollments WHERE student_id = ?',
+      [req.params.studentId]
+    );
+    res.json(enrollments);
+  } catch (error) {
+    console.error('Error fetching orientation enrollments:', error);
+    res.status(500).json({ error: 'Failed to fetch enrollments' });
+  }
+});
+
+app.post('/orientations/:orientationId/enroll', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { studentId } = req.body;
+    const { orientationId } = req.params;
+    
+    // Check if already enrolled
+    const existing = await db.get(
+      'SELECT id FROM orientation_enrollments WHERE orientation_id = ? AND student_id = ?',
+      [orientationId, studentId]
+    );
+    
+    if (existing) {
+      return res.status(400).json({ error: 'Already enrolled in this orientation' });
+    }
+    
+    const result = await db.run(
+      'INSERT INTO orientation_enrollments (orientation_id, student_id) VALUES (?, ?)',
+      [orientationId, studentId]
+    );
+    res.json({ id: result.lastID });
+  } catch (error) {
+    console.error('Error enrolling in orientation:', error);
+    res.status(500).json({ error: 'Failed to enroll in orientation' });
+  }
+});
+
+app.delete('/orientations/:orientationId/drop/:studentId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    await db.run(
+      'DELETE FROM orientation_enrollments WHERE orientation_id = ? AND student_id = ?',
+      [req.params.orientationId, req.params.studentId]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error dropping from orientation:', error);
+    res.status(500).json({ error: 'Failed to drop from orientation' });
+  }
+});
+
 const port = process.env.PORT || 3001;
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
@@ -487,17 +1002,81 @@ app.get('/application-status/:studentId', async (req, res) => {
   try {
     const db = await dbPromise;
     const { studentId } = req.params;
-    const user = await db.get('SELECT status, paid, documents FROM users WHERE id = ?', [studentId]);
+    const user = await db.get('SELECT status, paid, documents,paidClass FROM users WHERE id = ?', [studentId]);
     res.json({
       status: user?.status || 'pending',
       paid: user?.paid || false,
-      documents: user?.documents || ''
+      documents: user?.documents || '',
+      paidClass: user?.paidClass || ''
     });
   } catch (error) {
     console.error('Error checking application status:', error);
     res.status(500).json({ error: 'Failed to check application status' });
   }
 });
+
+// Get courses by class ID
+app.get('/classes/:id/courses', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const courses = await db.all(
+      `SELECT c.*, cl.name as class_name 
+       FROM courses c
+       LEFT JOIN classes cl ON c.class_id = cl.id
+       WHERE c.class_id = ?`,
+      [req.params.id]
+    );
+
+    // Parse schedule for each course if it exists
+    const parsedCourses = courses.map(course => {
+      if (course.schedule) {
+        try {
+          course.schedule = JSON.parse(course.schedule);
+        } catch (err) {
+          console.error(`Failed to parse schedule for course ${course.id}:`, err);
+          course.schedule = [];
+        }
+      } else {
+        course.schedule = [];
+      }
+      return course;
+    });
+
+    res.json(parsedCourses);
+  } catch (error) {
+    console.error('Error fetching class courses:', error);
+    res.status(500).json({ error: 'Failed to fetch courses' });
+  }
+});
+
+// Get student's class
+app.get('/students/:id/class', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { id } = req.params;
+    
+    // Get student's selected class from users table
+    const student = await db.get('SELECT selected_class FROM users WHERE id = ?', [id]);
+    
+    if (!student || !student.selected_class) {
+      return res.status(404).json({ error: 'No class found for this student' });
+    }
+    
+    // Get class details
+    const classDetails = await db.get('SELECT * FROM classes WHERE id = ?', [student.selected_class]);
+    
+    if (!classDetails) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+    
+    res.json(classDetails);
+  } catch (error) {
+    console.error('Error fetching student class:', error);
+    res.status(500).json({ error: 'Failed to fetch class details' });
+  }
+});
+
+
 
 // Get student's attendance
 app.get('/students/:id/attendance', async (req, res) => {
@@ -681,42 +1260,137 @@ app.get('/registrations/approved', async (req, res) => {
 
 // Update registration status
 app.put('/registrations/:id/status', async (req, res) => {
+  const { id: registrationId } = req.params;
+  const { status } = req.body;
+
+  console.log(`[Update Status] Received request. registrationId=${registrationId}, status=${status}`);
+
+  // Validate status field
+  if (!status || (status !== 'approved' && status !== 'rejected')) {
+    console.error(`[Update Status] Invalid status provided: ${status}`);
+    return res.status(400).json({
+      success: false,
+      message: "Invalid status. Must be 'approved' or 'rejected'."
+    });
+  }
+
   try {
-    const { id } = req.params;
-    const { status } = req.body;
     const db = await dbPromise;
 
-    console.log(`[Update Status] Incoming request to update status for registrationId: ${id} with status: ${status}`);
-
-    // Get user details
-    const user = await db.get('SELECT * FROM users WHERE registrationId = ?', [id]);
+    // Fetch user by registrationId
+    const user = await db.get(
+      `SELECT * FROM users WHERE registrationId = ?`,
+      [registrationId]
+    );
     if (!user) {
-      console.log(`[Update Status] User not found for registrationId: ${id}`);
-      return res.status(404).json({ success: false, message: 'User not found' });
+      console.warn(`[Update Status] No user found for registrationId=${registrationId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found for given registrationId.'
+      });
     }
+    console.log(`[Update Status] Found user: id=${user.id}, role=${user.role}, selected_class=${user.selected_class}, current status=${user.status}`);
 
-    console.log(`[Update Status] Current user status: ${user.status}`);
+    // Update the user's status
+    await db.run(
+      `UPDATE users SET status = ? WHERE registrationId = ?`,
+      [status, registrationId]
+    );
+    console.log(`[Update Status] Updated user.status to '${status}' for user.id=${user.id}`);
 
-    await db.run('UPDATE users SET status = ? WHERE registrationId = ?', [status, id]);
+    // If approved and user is a student, enroll in courses
+    if (status === 'approved') {
+      if (user.role !== 'student') {
+        console.log(`[Update Status] User id=${user.id} is not a student (role=${user.role}); skipping enrollment.`);
+      } else if (!user.selected_class) {
+        console.warn(`[Update Status] User id=${user.id} has no selected_class; cannot enroll in courses.`);
+      } else {
+        // Fetch all courses for the student's selected_class
+        const courses = await db.all(
+          `SELECT id FROM courses WHERE class_id = ?`,
+          [user.selected_class]
+        );
+        console.log(`[Update Status] Found ${courses.length} course(s) for class_id='${user.selected_class}'`);
 
-    console.log(`[Update Status] Updated user status to: ${status}`);
+        for (const course of courses) {
+          const alreadyEnrolled = await db.get(
+            `SELECT id FROM student_enrollments WHERE student_id = ? AND course_id = ?`,
+            [user.id, course.id]
+          );
+          if (alreadyEnrolled) {
+            console.log(`[Update Status] Student id=${user.id} already enrolled in course id=${course.id}; skipping.`);
+          } else {
+            await db.run(
+              `INSERT INTO student_enrollments (student_id, course_id, status) VALUES (?, ?, ?)`,
+              [user.id, course.id, 'approved']
+            );
+            console.log(`[Update Status] Enrolled student id=${user.id} in course id=${course.id}`);
+          }
+        }
 
-    // If approved and student role, enroll in selected class
-    if (status === 'approved' && user.role === 'student' && user.selected_class) {
+        if (courses.length === 0) {
+          console.warn(`[Update Status] No courses found to enroll for class_id='${user.selected_class}'.`);
+        }
+      }
+    }
+    // If rejected, delete related data and the user
+    else if (status === 'rejected') {
+      console.log(`[Update Status] User id=${user.id} will be rejected and related data deleted.`);
+      if (user.role === 'student') {
+        await db.run(
+          `DELETE FROM student_enrollments WHERE student_id = ?`,
+          [user.id]
+        );
+        console.log(`[Update Status] Deleted student_enrollments for student_id=${user.id}`);
+        await db.run(
+          `DELETE FROM attendance WHERE student_id = ?`,
+          [user.id]
+        );
+        console.log(`[Update Status] Deleted attendance records for student_id=${user.id}`);
+      } else if (user.role === 'teacher') {
+        await db.run(
+          `DELETE FROM teacher_enrollments WHERE teacher_id = ?`,
+          [user.id]
+        );
+        console.log(`[Update Status] Deleted teacher_enrollments for teacher_id=${user.id}`);
+      }
       await db.run(
-        'INSERT INTO student_enrollments (student_id, course_id, status) VALUES (?, ?, ?)',
-        [user.id, user.selected_class, 'approved']
+        `DELETE FROM users WHERE id = ?`,
+        [user.id]
       );
-      console.log(`[Update Status] Enrolled student ${user.id} in class ${user.selected_class}`);
+      console.log(`[Update Status] Deleted user id=${user.id} from users table.`);
     }
 
-    res.json({ success: true });
+    return res.json({ success: true });
   } catch (error) {
-    console.error('[Registration] Error updating status:', error);
-    res.status(500).json({
+    console.error('[Update Status] Error while processing:', error);
+    return res.status(500).json({
       success: false,
-      message: 'Failed to update registration status'
+      message: 'Failed to update registration status due to server error.'
     });
+  }
+});
+
+
+// Check application status endpoint
+app.get('/application-status/:studentId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const student = await db.get('SELECT status, paid, selected_class, paidClass FROM users WHERE id = ?', [req.params.studentId]);
+    
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+    
+    res.json({
+      status: student.status || 'pending',
+      paid: student.paid === 1 || student.paid === 'ok',
+      selected_class: student.selected_class,
+      paidClass: student.paidClass
+    });
+  } catch (error) {
+    console.error('Error checking application status:', error);
+    res.status(500).json({ error: 'Failed to check application status' });
   }
 });
 
@@ -734,31 +1408,45 @@ app.post('/student-application', upload.any(), async (req, res) => {
     let data = req.body;
     let fileBuffer = null;
     let fileName = null;
+
     if (req.files && req.files.length > 0) {
-      // Find the previousClassResult file
-      const file = req.files.find(f => f.fieldname === 'previousClassResult');
+      // Find the documents file field
+      const file = req.files.find(f => f.fieldname === 'documents');
       if (file) {
         fileBuffer = file.buffer;
         fileName = file.originalname;
-        data.previousClassResult = fileBuffer ? fileBuffer.toString('base64') : null;
+        data.documents = fileBuffer ? fileBuffer.toString('base64') : null;
       }
     }
-    // If not multipart, fallback to JSON
-    if (!data.previousClassResult && req.body.previousClassResult) {
-      data.previousClassResult = req.body.previousClassResult;
-    }
+
     const {
       userId,
-      classId,
-      previousClassResult,
-      bankName,
-      accountNumber,
-      accountHolderName,
-      registrationFee
+      selected_class,
+      bank_name,
+      account_number,
+      account_holder_name,
+      registration_fee,
+      documents
     } = data;
 
+    console.log('userId:', userId);
+    console.log('selected_class:', selected_class);
+    console.log('bank_name:', bank_name);
+    console.log('account_number:', account_number);
+    console.log('account_holder_name:', account_holder_name);
+    console.log('registration_fee:', registration_fee);
+    console.log('documents (base64):', documents);
+
     // Validate required fields
-    if (!userId || !classId || !previousClassResult || !bankName || !accountNumber || !accountHolderName) {
+    if (
+      !userId ||
+      !selected_class ||
+      !documents ||
+      !bank_name ||
+      !account_number ||
+      !account_holder_name ||
+      !registration_fee
+    ) {
       return res.status(400).json({
         success: false,
         message: 'All fields are required'
@@ -768,37 +1456,51 @@ app.post('/student-application', upload.any(), async (req, res) => {
     // Dynamically add missing columns
     const userColumns = await db.all("PRAGMA table_info(users)");
     const existingColumnNames = userColumns.map(col => col.name);
+
     const requiredFields = [
-      { key: 'selected_class', value: classId, type: 'TEXT' },
-      { key: 'documents', value: previousClassResult, type: 'TEXT' },
-      { key: 'bank_name', value: bankName, type: 'TEXT' },
-      { key: 'account_number', value: accountNumber, type: 'TEXT' },
-      { key: 'account_holder_name', value: accountHolderName, type: 'TEXT' },
-      { key: 'registration_fee', value: registrationFee, type: typeof registrationFee === 'number' ? 'INTEGER' : 'TEXT' }
+      { key: 'selected_class', type: 'TEXT' },
+      { key: 'documents', type: 'TEXT' },
+      { key: 'bank_name', type: 'TEXT' },
+      { key: 'account_number', type: 'TEXT' },
+      { key: 'account_holder_name', type: 'TEXT' },
+      { key: 'registration_fee', type: typeof registration_fee === 'number' ? 'INTEGER' : 'TEXT' }
     ];
+
     for (const field of requiredFields) {
       if (!existingColumnNames.includes(field.key)) {
         await db.exec(`ALTER TABLE users ADD COLUMN ${field.key} ${field.type}`);
       }
     }
 
-    // Update user with application details
-    // Ensure 'paid' column exists
+    // Ensure 'paid' and 'status' columns exist
     if (!existingColumnNames.includes('paid')) {
       await db.exec(`ALTER TABLE users ADD COLUMN paid TEXT`);
     }
+    if (!existingColumnNames.includes('status')) {
+      await db.exec(`ALTER TABLE users ADD COLUMN status TEXT`);
+    }
+
+    // Update user with application details
     await db.run(
       `UPDATE users SET 
-        selected_class = ?,
-        documents = ?,
-        bank_name = ?,
-        account_number = ?,
-        account_holder_name = ?,
-        registration_fee = ?,
-        paid = 'ok',
-        status = 'pending'
-      WHERE id = ?`,
-      [classId, previousClassResult, bankName, accountNumber, accountHolderName, registrationFee, userId]
+         selected_class = ?,
+         documents = ?,
+         bank_name = ?,
+         account_number = ?,
+         account_holder_name = ?,
+         registration_fee = ?,
+         paid = 'ok',
+         status = 'pending'
+       WHERE id = ?`,
+      [
+        selected_class,
+        documents,
+        bank_name,
+        account_number,
+        account_holder_name,
+        registration_fee,
+        userId
+      ]
     );
 
     res.status(200).json({
@@ -813,6 +1515,7 @@ app.post('/student-application', upload.any(), async (req, res) => {
     });
   }
 });
+
 
 // Teacher Application Details API
 app.post('/teacher-application', async (req, res) => {
