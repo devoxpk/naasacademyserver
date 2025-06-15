@@ -1510,7 +1510,7 @@ app.post('/student-application', upload.any(), async (req, res) => {
     success: false,
     message: 'Failed to submit application'
   });
-});
+};
 
 app.get('/student-application/:studentId', async (req, res) => {
   try {
@@ -1532,8 +1532,7 @@ app.get('/student-application/:studentId', async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to fetch application' });
   }
 });    });
-  }
-});
+
 
 
 // Teacher Application Details API
