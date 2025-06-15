@@ -1440,7 +1440,6 @@ app.post('/student-application', upload.any(), async (req, res) => {
     // Validate required fields
     if (
       !userId ||
-      !selected_class ||
       !documents ||
       !bank_name ||
       !account_number ||
@@ -1458,7 +1457,7 @@ app.post('/student-application', upload.any(), async (req, res) => {
     const existingColumnNames = userColumns.map(col => col.name);
 
     const requiredFields = [
-      { key: 'selected_class', type: 'TEXT' },
+
       { key: 'documents', type: 'TEXT' },
       { key: 'bank_name', type: 'TEXT' },
       { key: 'account_number', type: 'TEXT' },
@@ -1483,7 +1482,6 @@ app.post('/student-application', upload.any(), async (req, res) => {
     // Update user with application details
     await db.run(
       `UPDATE users SET 
-         selected_class = ?,
          documents = ?,
          bank_name = ?,
          account_number = ?,
@@ -1493,7 +1491,6 @@ app.post('/student-application', upload.any(), async (req, res) => {
          status = 'pending'
        WHERE id = ?`,
       [
-        selected_class,
         documents,
         bank_name,
         account_number,
@@ -1510,9 +1507,31 @@ app.post('/student-application', upload.any(), async (req, res) => {
   } catch (error) {
     console.error('Error submitting application:', error);
     res.status(500).json({
-      success: false,
-      message: 'Failed to submit application'
-    });
+    success: false,
+    message: 'Failed to submit application'
+  });
+});
+
+app.get('/student-application/:studentId', async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const { studentId } = req.params;
+
+    const application = await db.get(
+      `SELECT documents FROM users WHERE id = ?`,
+      [studentId]
+    );
+
+    if (application) {
+      res.status(200).json(application);
+    } else {
+      res.status(404).json({ success: false, message: 'Application not found' });
+    }
+  } catch (error) {
+    console.error('Error fetching student application:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch application' });
+  }
+});    });
   }
 });
 
